@@ -1,0 +1,216 @@
+---
+title: "Mamíferos de Costa Rica"
+format: dashboard
+---
+
+```{r}
+#| label: carga-paquetes
+
+library(tidyverse)
+library(plotly)
+library(DT)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(leafem)
+```
+
+
+```{r}
+#| label: simplificacion-provincias
+#| eval: false
+
+st_read(dsn = "provincias.geojson", quiet = TRUE) |>
+  st_simplify(dTolerance = 10, preserveTopology = TRUE) |>
+  st_write("provincias_simplificadas.geojson", delete_dsn = TRUE, quiet = TRUE)
+```
+
+```{r}
+#| label: reduccion-mamiferos
+#| eval: false
+
+read_delim(file = "mamiferos.csv") |>
+  select(species, decimalLongitude, decimalLatitude) |>
+  write_delim("mamiferos_reducidos.csv", delim = "\t")
+```
+
+
+```{r}
+#| label: carga-datos
+
+provincias <-st_read(
+  dsn = "provincias_simplificadas.geojson",
+  quiet = TRUE
+) |>
+st_simplify(dTolerance = 10, preserveTopology = TRUE) |>
+st_transform(4326)
+
+mamiferos <-
+  st_read(
+    "mamiferos_reducidos.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude", # columna de longitud decimal
+      "Y_POSSIBLE_NAMES=decimalLatitude"   # columna de latitud decimal
+    ),
+    quiet = TRUE
+  )
+
+# Asignación del CRS WGS84
+st_crs(mamiferos) <- 4326
+```
+
+# Registros de presencia por especie
+
+## Row
+
+### Column {width=30%}
+
+```{r}
+#| label: tabla-especies-registros
+#| title: "Cantidad de registros de presencia por especie"
+
+mamiferos |>
+  st_drop_geometry() |>
+  group_by(species) |>
+  summarize(n = n()) |>
+  filter(species != "") |>
+  arrange(desc(n)) |>
+  datatable(
+    colnames = c("Especie", "Cantidad de registros"),
+    rownames = FALSE,
+    options = list(
+      pageLength = 10,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+### Column {width=70%}
+
+```{r}
+#| label: grafico-especies-registros
+#| title: "Cantidad de registros de presencia por especie"
+
+grafico_ggplot2 <-
+mamiferos |>
+  st_drop_geometry() |>
+  group_by(species) |>
+  summarize(n = n()) |>
+  filter(species != "") |>
+  arrange(desc(n)) |>
+  slice(1:15) |>
+  ggplot(aes(
+    x = reorder(species, n),
+    y = n
+  )) +
+  geom_col() +
+  coord_flip()
+
+ggplotly(grafico_ggplot2) |> config(locale = "es")
+```
+
+# Riqueza de especies en provincias
+
+```{r}
+#| label: mapa-riqueza-especies-provincias
+#| title: "Riqueza de especies en provincias"
+
+mamiferos_union_provincias <- st_join(
+  x = mamiferos,
+  y = select(provincias, cod_provin),
+  join = st_within
+)
+
+riqueza_especies_mamiferos_provincias <-
+  mamiferos_union_provincias |>
+  st_drop_geometry() |>
+  group_by(cod_provin) |>
+  summarize(riqueza_especies = n_distinct(species, na.rm = TRUE))
+
+provincias_union_riqueza <-
+  left_join(
+    x = provincias,
+    y = select(riqueza_especies_mamiferos_provincias, cod_provin, riqueza_especies),
+    by = "cod_provin"
+  ) |>
+  replace_na(list(riqueza_especies = 0))
+
+
+# Paleta de colores de riqueza de especies
+colores_riqueza_especies <-
+  colorNumeric(
+    palette = "Reds",
+    domain = provincias_union_riqueza$riqueza_especies,
+    na.color = "transparent"
+  )
+
+# Mapa leaflet
+leaflet() |>
+  setView(
+    lng = -84.19452,
+    lat = 9.572735,
+    zoom = 7) |>
+  addTiles(group = "Mapa general (OpenStreetMap)") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales (ESRI World Imagery)"
+  ) |> 
+  addPolygons(
+    data = provincias_union_riqueza,
+    fillColor = ~ colores_riqueza_especies(provincias_union_riqueza$riqueza_especies),
+    fillOpacity = 0.8,
+    color = "black",
+    stroke = TRUE,
+    weight = 1.0,
+    popup = paste(
+      paste("<strong>Cantón:</strong>", provincias_union_riqueza$provincia),
+      paste("<strong>Riqueza de especies:</strong>", provincias_union_riqueza$riqueza_especies),
+      sep = '<br/>'
+    ),
+    group = "Riqueza de especies"
+  )  |>    
+  addLegend(
+    position = "bottomleft",
+    pal = colores_riqueza_especies,
+    values = provincias_union_riqueza$riqueza_especies,
+    group = "Riqueza de especies",
+    title = "Riqueza de especies"
+  ) |>
+  addCircleMarkers(
+    data = mamiferos,
+    stroke = F,
+    radius = 4,
+    fillColor = "black",
+    fillOpacity = 1.0,
+    popup = paste(
+      paste0("<strong>Especie: </strong>", mamiferos$species),
+      paste0("<strong>Localidad: </strong>", mamiferos$locality),
+      paste0("<strong>Fecha: </strong>", mamiferos$eventDate),
+      paste0("<strong>Fuente: </strong>", mamiferos$institutionCode),
+      paste0("<a href='", mamiferos$occurrenceID, "'>Más información</a>"),
+      sep = '<br/>'
+    ),   
+    clusterOptions = markerClusterOptions(),
+    group = "Registros de presencia"
+  )  |>  
+  addLayersControl(
+    baseGroups = c(
+      "Mapa general (OpenStreetMap)", 
+      "Imágenes satelitales (ESRI World Imagery)"
+    ),
+    overlayGroups = c(
+      "Riqueza de especies",
+      "Registros de presencia"
+    )
+  ) |>
+  addScaleBar(
+    position = "bottomleft", 
+    options = scaleBarOptions(imperial = FALSE)
+  ) |>      
+  addResetMapButton() |>
+  addSearchOSM() |>
+  addMouseCoordinates() |>
+  addFullscreenControl() |>
+  hideGroup("Registros de presencia")
+```
+
